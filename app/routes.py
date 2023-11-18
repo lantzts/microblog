@@ -1,10 +1,26 @@
 from flask import render_template, flash, redirect, url_for, request
 from flask_login import login_user, logout_user, current_user, login_required
 from app import app, db
-from app.forms import LoginForm, RegistrationForm, EditProfileForm, EmptyForm, PostForm
+from app.forms import (
+    LoginForm,
+    RegistrationForm,
+    EditProfileForm,
+    EmptyForm,
+    PostForm,
+    ResetPasswordRequestForm,
+    ResetPasswordForm,
+)
 from app.models import User, Post
 from werkzeug.urls import url_parse
 from datetime import datetime
+from app.email import send_password_reset_email
+
+
+@app.before_request
+def before_request():
+    if current_user.is_authenticated:
+        current_user.last_seen = datetime.utcnow()
+        db.session.commit()
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -71,7 +87,7 @@ def login():
         next_page = request.args.get("next")
         if not next_page or url_parse(next_page).netloc != "":
             next_page = url_for("index")
-        return redirect(url_for("index"))
+        return redirect(next_page)
     return render_template("login.html", title="Sign In", form=form)
 
 
@@ -96,6 +112,38 @@ def register():
     return render_template("register.html", title="Register", form=form)
 
 
+@app.route("/reset_password_request", methods=["GET", "POST"])
+def reset_password_request():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    form = ResetPasswordRequestForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(email=form.email.data).first()
+        if user:
+            send_password_reset_email(user)
+        flash("Check your email for the instructions to reset your password")
+        return redirect(url_for("login"))
+    return render_template(
+        "reset_password_request.html", title="Reset Password", form=form
+    )
+
+
+@app.route("/reset_password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    user = User.verify_reset_password_token(token)
+    if not user:
+        return redirect(url_for("index"))
+    form = ResetPasswordForm()
+    if form.validate_on_submit():
+        user.set_password(form.password.data)
+        db.session.commit()
+        flash("Your password has been reset.")
+        return redirect(url_for("login"))
+    return render_template("reset_password.html", form=form)
+
+
 @app.route("/user/<username>")
 @login_required
 def user(username):
@@ -118,10 +166,10 @@ def user(username):
     return render_template(
         "user.html",
         user=user,
-        posts=posts,
-        form=form,
+        posts=posts.items,
         next_url=next_url,
         prev_url=prev_url,
+        form=form,
     )
 
 
@@ -141,13 +189,6 @@ def edit_profile():
     return render_template("edit_profile.html", title="Edit Profile", form=form)
 
 
-@app.before_request
-def before_request():
-    if current_user.is_authenticated:
-        current_user.last_seen = datetime.utcnow()
-        db.session.commit()
-
-
 @app.route("/follow/<username>", methods=["POST"])
 @login_required
 def follow(username):
@@ -159,7 +200,7 @@ def follow(username):
             return redirect(url_for("index"))
         if user == current_user:
             flash(f"You cannot follow yourself!")
-            return redirect(url_for("index"))
+            return redirect(url_for("user", username=username))
         current_user.follow(user)
         db.session.commit()
         flash(f"You are now following {username}!")
@@ -179,7 +220,7 @@ def unfollow(username):
             return redirect(url_for("index"))
         if user == current_user:
             flash(f"You cannot unfollow yourself!")
-            return redirect(url_for("index"))
+            return redirect(url_for("user", username=username))
         current_user.unfollow(user)
         db.session.commit()
         flash(f"You are no longer following {username}")
